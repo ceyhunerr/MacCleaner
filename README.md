@@ -18,6 +18,7 @@ Terminal Rosetta altında çalışsa bile betik yerel (arm64) derler.
   - Tespitler: uzun süre yeniden başlatılmama, şişmiş sistem servisleri (ör. `fseventsd`), yüksek wired/swap, sahipsiz `xcdevice` ve Flutter/Dart süreçleri, Gradle/Kotlin daemon'ları, Rosetta ile çalışan uygulamalar.
   - `purge` ile dosya önbelleğini boşaltma (yönetici şifresi ister).
 - **Disk Temizliği:** Tarama yapar, bulunanları kategorilere ayırır. "Güvenli" öğeler varsayılan olarak seçilir, "Dikkat" öğeleri seçilmez; her öğenin altında silinince ne olacağı yazar. Onay ekranından sonra silinir.
+  - **Silinmiş uygulama kalıntıları:** Kaldırılan uygulamaların Library'de bıraktığı veriler (Application Support, Containers, Group Containers, Caches, Preferences, HTTPStorages, WebKit, Saved Application State) uygulama bazında gruplanır. Programı artık olmayan LaunchAgent'lar da bulunur.
 - **Raporlar:** Her temizlikte önce/sonra ölçümleri ve öğe öğe sonuçlar kaydedilir (`~/Library/Application Support/MacCleaner/Reports`). Markdown olarak kopyalanabilir veya kaydedilebilir.
 
 ## Güvenlik kuralları
@@ -26,11 +27,12 @@ Terminal Rosetta altında çalışsa bile betik yerel (arm64) derler.
 - Chrome gibi Chromium tabanlı uygulamaların kod imzası kopyalarından, uygulama açıldığından beri oluşturulmuş olanlara dokunulmaz. Açılış zamanı bilinmiyorsa hepsi korunur.
 - Gradle ve NDK sürümleri, taranan projelerde kullanılmıyorsa önerilir. Taranan klasörler: `~/Documents`, `~/Desktop`, `~/Developer`, `~/Projects` ve benzerleri.
 - Açık olan tarayıcının önbelleği, çalışan Xcode'un DerivedData'sı ve açık emülatörün verisi "Dikkat" olarak işaretlenir ya da hiç taranmaz.
+- Bir veri, şunlardan biriyle eşleşiyorsa kalıntı sayılmaz: kurulu ya da çalışan bir uygulama (eklentileri ve yardımcıları dahil), LaunchServices'in bildiği bir uygulama, aynı imza ekibinden bir uygulama (grup kapsayıcıları için), Homebrew paketleri ve komut satırı araçları. Apple verileri de kalıntı sayılmaz. Son 30 günde değişmiş veriler "hâlâ kullanılıyor" kabul edilir. Kalıntılar her zaman "Dikkat" olarak işaretlenir ve seçili gelmez.
 - Boyutlar `du` ile ölçülür. APFS kopyaları veri paylaştığı için tahmin gerçek kazançtan büyük olabilir; rapor, disk ölçümüyle bulunan gerçek değeri ayrıca gösterir.
 
 ## İzinler
 
-İlk taramada macOS Belgeler, Masaüstü ve İndirilenler klasörleri için izin ister. Çöp Kutusu'nun da taranması için Sistem Ayarları → Gizlilik ve Güvenlik → Tam Disk Erişimi'nden MacCleaner'a izin ver.
+İlk taramada macOS Belgeler, Masaüstü ve İndirilenler klasörleri için, kalıntı taramasında da diğer uygulamaların verilerine erişim için izin isteyebilir. Çöp Kutusu'nun da taranması için Sistem Ayarları → Gizlilik ve Güvenlik → Tam Disk Erişimi'nden MacCleaner'a izin ver; bu izin diğer sorulara da gerek bırakmaz.
 
 ## Komut satırı
 

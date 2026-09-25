@@ -2,11 +2,12 @@ import AppKit
 import Darwin
 import Foundation
 import Observation
+import Security
 
 // MARK: - Model
 
 enum JunkCategory: String, CaseIterable, Identifiable, Codable {
-    case system, xcode, projects, devCaches, android, personal
+    case system, leftovers, xcode, projects, devCaches, android, personal
 
     var id: String { rawValue }
     var order: Int { Self.allCases.firstIndex(of: self) ?? 0 }
@@ -14,6 +15,7 @@ enum JunkCategory: String, CaseIterable, Identifiable, Codable {
     var title: String {
         switch self {
         case .system: "Sistem ve tarayıcılar"
+        case .leftovers: "Silinmiş uygulama kalıntıları"
         case .xcode: "Xcode ve iOS"
         case .projects: "Proje derleme klasörleri"
         case .devCaches: "Geliştirici önbellekleri"
@@ -25,6 +27,7 @@ enum JunkCategory: String, CaseIterable, Identifiable, Codable {
     var icon: String {
         switch self {
         case .system: "macwindow"
+        case .leftovers: "app.dashed"
         case .xcode: "hammer"
         case .projects: "folder.badge.gearshape"
         case .devCaches: "shippingbox"
@@ -68,10 +71,12 @@ struct JunkItem: Identifiable, Hashable {
     var size: Int64 = 0
     var selected: Bool
     let modified: Date?
+    /// Shown even when smaller than 1 MB (e.g. a broken launch agent).
+    let keepSmall: Bool
 
     init(_ id: String, _ category: JunkCategory, title: String, detail: String, note: String? = nil,
          risk: Risk, deletion: Deletion, sizePaths: [String] = [], knownSize: Int64 = 0,
-         selected: Bool? = nil, modified: Date? = nil) {
+         selected: Bool? = nil, modified: Date? = nil, keepSmall: Bool = false) {
         self.id = id
         self.category = category
         self.title = title
@@ -83,6 +88,7 @@ struct JunkItem: Identifiable, Hashable {
         self.knownSize = knownSize
         self.selected = selected ?? (risk == .safe)
         self.modified = modified
+        self.keepSmall = keepSmall
     }
 
     var revealPath: String? {
@@ -300,10 +306,12 @@ final class ScanEngine {
         items += androidItems()
         progress("İndirilenler taranıyor…")
         items += personalItems()
+        progress("Silinmiş uygulamaların kalıntıları aranıyor…")
+        items += leftoverItems(excluding: Set(items.flatMap(\.sizePaths)))
         progress("Boyutlar hesaplanıyor (\(items.count) öğe)…")
         measure(&items)
         return items
-            .filter { $0.size >= MB }
+            .filter { $0.size >= MB || $0.keepSmall }
             .sorted { ($0.category.order, -$0.size) < ($1.category.order, -$1.size) }
     }
 
@@ -852,6 +860,256 @@ final class ScanEngine {
             }
         }
         return nil
+    }
+
+    // MARK: Leftovers of removed apps
+
+    private struct AppInventory {
+        var bundleIDs: Set<String> = []
+        /// App names; also matched as prefixes ("Antigravity IDE" → Antigravity).
+        var names: Set<String> = []
+        /// Command-line tools and process names; exact matches only (`open` must not claim "OpenASO").
+        var commands: Set<String> = []
+        var teamIDs: Set<String> = []
+    }
+
+    /// Apple services that keep human-named folders in Application Support.
+    private static let systemSupportFolders: Set<String> = [
+        "addressbook", "animoji", "appstore", "callhistorydb", "callhistorytransactions", "clouddocs",
+        "controlcenter", "crashreporter", "differentialprivacy", "diskimages", "facetime", "fileprovider",
+        "icloud", "knowledge", "mobilesync", "music", "networkserviceproxy", "sesstorage", "spotlight",
+        "syncservices", "dock", "accessibility", "coreparsec", "photos", "safari", "mail", "maps", "books",
+        "podcasts", "messages", "notes", "reminders", "calendars", "shortcuts", "siri", "wallet", "freeform",
+        "journal", "passwords", "quicklook", "cloudkit", "applemediaservices", "homekit",
+    ]
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private func leftoverItems(excluding covered: Set<String>) -> [JunkItem] {
+        struct Group {
+            var name: String
+            var bundleID: String?
+            var paths: [String] = []
+            var places: Set<String> = []
+        }
+        let inventory = appInventory()
+        let library = h("Library")
+        var groups: [String: Group] = [:]
+
+        func looksLikeBundleID(_ text: String) -> Bool {
+            firstMatch(#"^([A-Za-z0-9-]+(?:\.[A-Za-z0-9_-]+){2,})$"#, in: text) != nil
+        }
+        func add(_ path: String, key: String, name: String, place: String) {
+            // Paths another category already offers (e.g. SwiftPM cache) aren't listed twice.
+            guard !covered.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }) else { return }
+            groups[key, default: Group(name: name)].paths.append(path)
+            groups[key]?.places.insert(place)
+        }
+
+        let namedByID: [(dir: String, suffix: String?)] = [
+            ("Containers", nil), ("Caches", nil), ("HTTPStorages", ".binarycookies"), ("WebKit", nil),
+            ("Application Support", nil), ("Saved Application State", ".savedState"), ("Preferences", ".plist"),
+        ]
+        for (dir, suffix) in namedByID {
+            for path in children(library.appendingPath(dir)) {
+                var id = path.lastPathComponent
+                if let suffix, id.hasSuffix(suffix) { id = String(id.dropLast(suffix.count)) }
+                guard looksLikeBundleID(id), !isOwned(id, team: nil, vendorWide: false, by: inventory) else { continue }
+                add(path, key: id.lowercased(), name: id, place: dir)
+            }
+        }
+
+        // Group containers are shared by a vendor's apps: match by signing team or vendor prefix.
+        for path in children(library.appendingPath("Group Containers")) {
+            var id = path.lastPathComponent
+            var team: String?
+            if let prefix = firstMatch(#"^([A-Z0-9]{10})\."#, in: id) {
+                team = prefix
+                id = String(id.dropFirst(prefix.count + 1))
+            }
+            if id.hasPrefix("group.") { id = String(id.dropFirst(6)) }
+            guard team != nil || id.split(separator: ".").count >= 2,
+                  !isOwned(id, team: team, vendorWide: true, by: inventory) else { continue }
+            add(path, key: id.lowercased(), name: path.lastPathComponent, place: "Group Containers")
+        }
+
+        for path in children(library.appendingPath("Application Support")) where isDir(path) {
+            let name = path.lastPathComponent
+            guard !looksLikeBundleID(name), !isOwned(humanName: name, by: inventory) else { continue }
+            let key = "name:" + Self.normalized(name)
+            add(path, key: key, name: name, place: "Application Support")
+            let cache = library.appendingPath("Caches").appendingPath(name)
+            if isDir(cache) { add(cache, key: key, name: name, place: "Caches") }
+        }
+
+        // Fold extensions and helpers into their app (com.foo.app.widget → com.foo.app).
+        var merged: [String: Group] = [:]
+        for key in groups.keys.sorted(by: { $0.count < $1.count }) {
+            guard let group = groups[key] else { continue }
+            if let root = merged.keys.first(where: { !$0.hasPrefix("name:") && key.hasPrefix($0 + ".") }) {
+                merged[root]?.paths += group.paths
+                merged[root]?.places.formUnion(group.places)
+            } else {
+                merged[key] = group
+            }
+        }
+        // A human-named folder joins the bundle-id group it names ("OpenASO" → com.thirdtech.openaso).
+        for key in merged.keys.filter({ $0.hasPrefix("name:") }) {
+            let name = String(key.dropFirst(5))
+            guard let target = merged.keys.first(where: {
+                      !$0.hasPrefix("name:") && $0.split(separator: ".").contains { Self.normalized(String($0)) == name }
+                  }),
+                  var group = merged[target],
+                  let human = merged.removeValue(forKey: key) else { continue }
+            group.paths += human.paths
+            group.places.formUnion(human.places)
+            group.bundleID = group.name
+            group.name = human.name
+            merged[target] = group
+        }
+
+        var items: [JunkItem] = []
+        let cutoff = Date().addingTimeInterval(-30 * 86_400)
+        for (key, group) in merged {
+            // Data touched in the last month belongs to something still in use, even if we couldn't match it.
+            guard let last = group.paths.compactMap(lastActivity).max(), last < cutoff else { continue }
+            items.append(JunkItem(
+                "leftover-\(key)", .leftovers, title: group.name,
+                detail: group.places.sorted().joined(separator: ", ") + (group.bundleID.map { " · \($0)" } ?? ""),
+                note: "Bu verilere ait kurulu bir uygulama bulunamadı. Uygulamayı yeniden kurarsan ayarları ve verileri sıfırdan başlar.",
+                risk: .caution, deletion: .remove(group.paths), sizePaths: group.paths, modified: last))
+        }
+
+        for path in children(library.appendingPath("LaunchAgents")) where path.hasSuffix(".plist") {
+            guard let data = fm.contents(atPath: path),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let program = (plist["Program"] as? String) ?? (plist["ProgramArguments"] as? [String])?.first,
+                  program.hasPrefix("/"), !program.hasPrefix("/Volumes/"), !exists(program) else { continue }
+            let label = plist["Label"] as? String ?? (path.lastPathComponent as NSString).deletingPathExtension
+            items.append(JunkItem(
+                "agent-\(path)", .leftovers, title: "Sahipsiz arka plan görevi: \(label)",
+                detail: "Çalıştırdığı program artık yok: \(program.tildePath)",
+                note: "Her oturum açılışında boşuna başlatılmaya çalışılır; silmek güvenli.",
+                risk: .safe,
+                deletion: .run([Command(path: "/bin/launchctl", args: ["bootout", "gui/\(getuid())/\(label)"], ignoreFailure: true),
+                                Command(path: "/bin/rm", args: ["-f", path])]),
+                sizePaths: [path], keepSmall: true))
+        }
+        return items
+    }
+
+    private func appInventory() -> AppInventory {
+        var inventory = AppInventory()
+
+        func add(bundle path: String) {
+            guard let plistPath = [path.appendingPath("Contents/Info.plist"), path.appendingPath("WrappedBundle/Info.plist")]
+                .first(where: exists),
+                let data = fm.contents(atPath: plistPath),
+                let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+            else { return }
+            if let id = info["CFBundleIdentifier"] as? String { inventory.bundleIDs.insert(id.lowercased()) }
+            for key in ["CFBundleName", "CFBundleDisplayName", "CFBundleExecutable"] {
+                if let name = info[key] as? String { inventory.names.insert(Self.normalized(name)) }
+            }
+            inventory.names.insert(Self.normalized((path.lastPathComponent as NSString).deletingPathExtension))
+        }
+
+        for root in ["/Applications", "/System/Applications", h("Applications"), "/System/Library/CoreServices"] {
+            guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: nil,
+                                                 options: [.skipsHiddenFiles]) else { continue }
+            for case let url as URL in enumerator {
+                guard url.pathExtension == "app" else {
+                    if enumerator.level >= 3 { enumerator.skipDescendants() }
+                    continue
+                }
+                enumerator.skipDescendants()
+                add(bundle: url.path)
+                // Helpers and extensions don't always extend the app's own bundle id.
+                for sub in ["Contents/Library/LoginItems", "Contents/Library/LaunchServices", "Contents/PlugIns",
+                            "Contents/XPCServices", "Contents/Helpers"] {
+                    children(url.path.appendingPath(sub)).forEach { add(bundle: $0) }
+                }
+                if !url.path.hasPrefix("/System/"), let team = teamID(of: url.path) { inventory.teamIDs.insert(team) }
+            }
+        }
+        for app in NSWorkspace.shared.runningApplications {
+            if let id = app.bundleIdentifier { inventory.bundleIDs.insert(id.lowercased()) }
+            if let name = app.localizedName { inventory.names.insert(Self.normalized(name)) }
+        }
+        running.names.forEach { inventory.commands.insert(Self.normalized($0)) }
+        // Command-line tools and Homebrew packages keep data in Application Support too (go, dart, mysql…).
+        for dir in ["/opt/homebrew/bin", "/opt/homebrew/Cellar", "/opt/homebrew/Caskroom", "/usr/local/bin",
+                    "/usr/local/Cellar", "/usr/local/Caskroom", "/usr/bin", h(".local/bin"), h("go/bin"),
+                    h(".cargo/bin"), h(".pub-cache/bin")] {
+            children(dir).forEach { inventory.commands.insert(Self.normalized($0.lastPathComponent)) }
+        }
+        inventory.names.remove("")
+        inventory.commands.remove("")
+        return inventory
+    }
+
+    private func teamID(of path: String) -> String? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess,
+              let code else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any] else { return nil }
+        return dict[kSecCodeInfoTeamIdentifier as String] as? String
+    }
+
+    /// Whether an installed or running app plausibly owns data named after this bundle id.
+    private func isOwned(_ rawID: String, team: String?, vendorWide: Bool, by inventory: AppInventory) -> Bool {
+        let id = rawID.lowercased()
+        if id.contains("apple") || id.hasPrefix("is.workflow") { return true }
+        if let team, inventory.teamIDs.contains(team) { return true }
+        if inventory.bundleIDs.contains(id) { return true }
+        let parts = id.split(separator: ".").map(String.init)
+        // A parent id is installed (extension or helper: com.foo.app.widget → com.foo.app)…
+        let minimum = vendorWide ? 2 : 3
+        if parts.count > minimum {
+            for n in minimum..<parts.count where inventory.bundleIDs.contains(parts.prefix(n).joined(separator: ".")) {
+                return true
+            }
+        }
+        // …or this is a vendor-level folder of an installed app (com.foo → com.foo.app).
+        if inventory.bundleIDs.contains(where: { $0.hasPrefix(id + ".") }) { return true }
+        if vendorWide, parts.count >= 2 {
+            let vendor = parts.prefix(2).joined(separator: ".") + "."
+            if inventory.bundleIDs.contains(where: { $0.hasPrefix(vendor) }) { return true }
+        }
+        // LaunchServices also knows apps outside the usual folders (e.g. run from Downloads).
+        return NSWorkspace.shared.urlsForApplications(withBundleIdentifier: rawID)
+            .contains { !$0.path.contains("/.Trash/") && exists($0.path) }
+    }
+
+    private func isOwned(humanName name: String, by inventory: AppInventory) -> Bool {
+        let key = Self.normalized(name)
+        guard key.count > 2, !Self.systemSupportFolders.contains(key) else { return true }
+        // Apple daemons keep lowercase folders named after themselves (contactsd, tipsd…).
+        if name == name.lowercased(), name.hasSuffix("d"), !name.contains(" ") { return true }
+        let withoutVersion = String(key.reversed().drop(while: \.isNumber).reversed())
+        for candidate in [key, withoutVersion] where inventory.names.contains(candidate) || inventory.commands.contains(candidate) {
+            return true
+        }
+        // Vendor folders ("Google", "BraveSoftware") and suffixed ones ("Antigravity IDE").
+        if inventory.names.contains(where: { $0.count >= 4 && key.count >= 4 && (key.hasPrefix($0) || $0.hasPrefix(key)) }) {
+            return true
+        }
+        return inventory.bundleIDs.contains { $0.split(separator: ".").contains { Self.normalized(String($0)) == key } }
+    }
+
+    /// Latest modification within two levels; data an app still uses keeps changing.
+    private func lastActivity(_ path: String) -> Date? {
+        var latest = mdate(path)
+        for child in children(path).prefix(200) {
+            for date in [mdate(child)] + children(child).prefix(100).map(mdate) {
+                if let date, date > (latest ?? .distantPast) { latest = date }
+            }
+        }
+        return latest
     }
 
     // MARK: Personal files
