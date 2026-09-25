@@ -38,3 +38,7 @@ Terminal Rosetta altında çalışsa bile betik yerel (arm64) derler.
 open /Applications/MacCleaner.app --args -section memory           # doğrudan Bellek bölümünü aç
 open /Applications/MacCleaner.app --args -section cleanup -scan YES # Disk Temizliği'ni aç ve taramayı başlat
 ```
+
+## Lisans
+
+MIT. Ayrıntılar için [LICENSE](LICENSE) dosyasına bak.
