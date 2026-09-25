@@ -7,9 +7,17 @@ RAM kullanımını gösteren, bellek sorunlarını tespit eden, diskteki çöple
 ```bash
 ./build.sh --install --open   # derler, /Applications/MacCleaner.app olarak kurar ve açar
 ./build.sh                    # yalnızca dist/MacCleaner.app oluşturur
+./build.sh --dmg              # ayrıca dist/MacCleaner-<sürüm>.dmg kurulum imajını oluşturur
 ```
 
-Terminal Rosetta altında çalışsa bile betik yerel (arm64) derler.
+Terminal Rosetta altında çalışsa bile betik yerel (arm64) derler. Uygulama yalnızca Apple Silicon Mac'lerde çalışır.
+
+### İndirilen DMG'yi açmak
+
+Uygulama ad-hoc imzalıdır, Apple notarizasyonundan geçmemiştir. İnternetten indirilen kopyayı ilk açışta macOS engeller. `MacCleaner.app`'i Applications'a sürükledikten sonra şunlardan birini yap:
+
+- Uygulamayı bir kez açmayı dene, sonra Sistem Ayarları → Gizlilik ve Güvenlik → **"Yine de Aç"** düğmesine bas.
+- Ya da Terminal'de: `xattr -dr com.apple.quarantine /Applications/MacCleaner.app`
 
 ## Bölümler
 

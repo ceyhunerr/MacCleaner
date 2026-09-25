@@ -1,8 +1,9 @@
 #!/bin/bash
 # MacCleaner'ı derler ve dist/MacCleaner.app paketini oluşturur.
-# Kullanım: ./build.sh [--install] [--open]
+# Kullanım: ./build.sh [--install] [--open] [--dmg]
 #   --install  /Applications klasörüne kopyalar
 #   --open     derlemeden sonra uygulamayı açar
+#   --dmg      dist/MacCleaner-<sürüm>.dmg kurulum imajını oluşturur
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,6 +39,18 @@ for arg in "$@"; do
       cp -R "$APP" /Applications/
       TARGET=/Applications/MacCleaner.app
       echo "✓ /Applications/MacCleaner.app kuruldu"
+      ;;
+    --dmg)
+      # Uygulama ve Applications kısayolu: sürükle-bırak ile kurulum.
+      VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
+      DMG="dist/MacCleaner-$VERSION.dmg"
+      staging=$(mktemp -d)
+      cp -R "$APP" "$staging/"
+      ln -s /Applications "$staging/Applications"
+      rm -f "$DMG"
+      hdiutil create -volname MacCleaner -srcfolder "$staging" -fs HFS+ -format UDZO "$DMG" >/dev/null
+      rm -rf "$staging"
+      echo "✓ $DMG hazır"
       ;;
   esac
 done
